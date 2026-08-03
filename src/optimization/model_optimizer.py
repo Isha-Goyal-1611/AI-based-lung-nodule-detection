@@ -42,7 +42,7 @@ def export_to_onnx(model, input_tensor, output_path='outputs/model.onnx'):
         input_tensor,
         output_path,
         export_params=True,
-        opset_version=11,
+        opset_version=17,
         input_names=['ct_patch'],
         output_names=['nodule_probability'],
         dynamic_axes={
@@ -52,8 +52,10 @@ def export_to_onnx(model, input_tensor, output_path='outputs/model.onnx'):
     )
     
     # Get ONNX file size
-    onnx_size_mb = os.path.getsize(output_path) / 1_000_000
-    return onnx_size_mb
+    onnx_size_bytes = os.path.getsize(output_path)
+    onnx_size_mb = onnx_size_bytes / 1_000_000
+    onnx_size_kb = onnx_size_bytes / 1_000
+    return onnx_size_mb, onnx_size_kb
 
 def apply_dynamic_quantization(model):
     """
@@ -68,9 +70,14 @@ def apply_dynamic_quantization(model):
     return quantized_model
 
 if __name__ == "__main__":
-    # Load model
+    # Load REAL trained model, not a fresh untrained one
+    import torch
     model = SimpleCNN()
+    checkpoint = torch.load('checkpoints/best_model_gpu.pt', map_location='cpu')
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
+    print(f"Loaded real trained checkpoint (epoch {checkpoint['epoch']}, "
+          f"val_loss {checkpoint['val_loss']:.4f})\n")
     
     # Fake input
     fake_input = torch.randn(1, 1, 32, 32)
@@ -89,8 +96,8 @@ if __name__ == "__main__":
     
     # Step 2: Export to ONNX
     print(f"\n📦 Exporting to ONNX...")
-    onnx_size = export_to_onnx(model, fake_input)
-    print(f"   ONNX file size: {onnx_size:.2f} MB")
+    onnx_size_mb, onnx_size_kb = export_to_onnx(model, fake_input)
+    print(f"   ONNX file size: {onnx_size_mb:.2f} MB ({onnx_size_kb:.2f} KB)")
     print(f"   Saved to: outputs/model.onnx ✅")
     
     # Step 3: Apply quantization

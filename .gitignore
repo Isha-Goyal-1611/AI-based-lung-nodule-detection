@@ -19,3 +19,14 @@ data/raw/*.dcm
 
 # ONNX model (large file)
 outputs/*.onnx
+# Debugging/scratch scripts (not part of the real project)
+test_*.py
+fix_import.py
+evaluate_full_pipeline*.py
+evaluate_multislice*.py
+debug_*.py
+*.pkl
+
+# Full data directory (only sample.dcm should be tracked)
+data/raw/*
+!data/raw/sample.dcm

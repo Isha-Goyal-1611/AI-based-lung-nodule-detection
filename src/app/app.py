@@ -11,6 +11,66 @@ import io
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from full_pipeline import run_full_pipeline
+import torch
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'preprocessing'))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models'))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'evaluation'))
+
+from models.malignancy_classifier import MalignancyClassifier
+from evaluation.lung_rads import malignancy_to_lungrads
+
+@st.cache_resource
+def load_malignancy_model():
+    model = MalignancyClassifier()
+    checkpoint_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        'checkpoints', 'malignancy_model_100patients.pt'
+    )
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    return model
+
+
+def estimate_malignancy(hu_image, candidate_x, candidate_y, area):
+    """
+    Rough malignancy estimate using a 2D candidate location.
+    NOTE: MalignancyClassifier expects a real 3D patch + 3 clinical
+    features (diameter, subtlety, texture) from LIDC-IDRI-style data.
+    Since full_pipeline.py only gives us a single 2D slice, we build an
+    approximate 3D patch by stacking the same 2D slice, and use only
+    diameter as a real feature (subtlety/texture default to a neutral 0.5
+    since we don't have radiologist-style ratings in this 2D pipeline).
+    This is a simplification — a true 3D scan would give a more accurate
+    input to this model.
+    """
+    model = load_malignancy_model()
+
+    half = 16
+    y, x = int(candidate_y), int(candidate_x)
+    y_min, y_max = max(0, y - half), min(hu_image.shape[0], y + half)
+    x_min, x_max = max(0, x - half), min(hu_image.shape[1], x + half)
+
+    patch_2d = hu_image[y_min:y_max, x_min:x_max]
+    patch_2d = np.clip(patch_2d, -1000, 400)
+    patch_2d = (patch_2d + 1000) / 1400
+
+    if patch_2d.shape != (32, 32):
+        pad_y = 32 - patch_2d.shape[0]
+        pad_x = 32 - patch_2d.shape[1]
+        patch_2d = np.pad(patch_2d, ((0, pad_y), (0, pad_x)), mode='constant', constant_values=0)
+
+    # Stack the 2D slice into a fake 3D volume (approximation, see docstring)
+    patch_3d = np.stack([patch_2d] * 32, axis=0).astype(np.float32)
+    patch_tensor = torch.from_numpy(patch_3d).unsqueeze(0).unsqueeze(0)
+
+    diameter_estimate = np.sqrt(area / np.pi) * 2  # rough diameter from area
+    clinical_features = torch.tensor([[diameter_estimate, 0.5, 0.5]], dtype=torch.float32)
+
+    with torch.no_grad():
+        malignancy_score = model(patch_tensor, clinical_features).item()
+
+    return malignancy_score
 
 # ── Page Config ──────────────────────────────────────────────
 st.set_page_config(
@@ -85,6 +145,17 @@ if uploaded_file is not None:
     hu_image = np.clip(pixel_array * slope + intercept, -1000, 400)
     
     st.divider()
+    # ── Malignancy Estimation ──────────────────────────────
+    if not candidates_df.empty:
+        malignancy_scores = []
+        lungrads_categories = []
+        for _, row in candidates_df.iterrows():
+            score = estimate_malignancy(hu_image, row['x'], row['y'], row['area'])
+            malignancy_scores.append(score)
+            lungrads_categories.append(malignancy_to_lungrads(score))
+        candidates_df = candidates_df.copy()
+        candidates_df['malignancy_score'] = malignancy_scores
+        candidates_df['lung_rads'] = lungrads_categories
     
     # ── Results Layout ────────────────────────────────────────
     col1, col2, col3 = st.columns(3)
@@ -151,8 +222,16 @@ if uploaded_file is not None:
             display_df['y'] = display_df['y'].round(1)
             display_df['area'] = display_df['area'].astype(int)
             display_df['mean_intensity'] = display_df['mean_intensity'].round(1)
+            if 'malignancy_score' in display_df.columns:
+                display_df['malignancy_score'] = display_df['malignancy_score'].round(3)
             st.dataframe(display_df, use_container_width=True)
-            
+
+            if 'malignancy_score' in candidates_df.columns:
+                st.caption(
+                    "⚠️ Malignancy scores are approximated from a single 2D slice — "
+                    "the underlying model was trained on full 3D CT volumes. "
+                    "Treat these as illustrative, not clinically accurate."
+                )
             # Download button
             csv = candidates_df.to_csv(index=False)
             st.download_button(

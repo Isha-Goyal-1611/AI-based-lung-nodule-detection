@@ -1,7 +1,6 @@
 # 🫁 Lung Cancer Detection System
 
-AI-powered lung nodule candidate detection from chest CT scans.
-Built as a complete end-to-end medical AI project over 30 days.
+AI-powered lung nodule detection, malignancy estimation, and lung segmentation from chest CT scans. Built as an end-to-end learning project combining classical image processing with trained deep learning models — real data, real training, real evaluation, real bugs found and fixed along the way.
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange)
@@ -11,92 +10,110 @@ Built as a complete end-to-end medical AI project over 30 days.
 
 ---
 
-## 🎯 What This Project Does
+## 🎯 What This Project Actually Does
 
-This system takes a chest CT scan (DICOM format) as input and:
+Given a chest CT scan (DICOM format), this system:
 
-1. **Loads** the DICOM file and extracts patient metadata
-2. **Preprocesses** the scan (Hounsfield Unit conversion, clipping, normalization)
-3. **Segments** the lung tissue from surrounding structures (ribs, spine, heart)
-4. **Detects** suspicious nodule candidates inside the lungs
-5. **Returns** candidate locations, sizes, and density values
-6. **Displays** results in a clinical-style web interface with red circle annotations
+1. **Segments lung tissue** using either a classical HU-threshold method or a trained U-Net (Dice 0.81)
+2. **Detects nodule candidates** using density-based analysis inside the lung region
+3. **Classifies candidates** as likely nodule vs. not, using a trained CNN — either a compact SimpleCNN or a fine-tuned ResNet-18 (ResNet-18 proven meaningfully better on held-out data)
+4. **Estimates malignancy** for detected nodules using a 3D CNN trained on LIDC-IDRI multi-radiologist consensus labels
+5. **Maps malignancy scores to illustrative Lung-RADS categories**
+6. **Optionally applies multi-slice consistency filtering** (full-volume analysis) to reduce false positives
 
----
-
-## 🖥️ Demo
-
-![Pipeline Output](outputs/day22_full_pipeline.png)
-
-### Web Interface (Streamlit)
-- Upload any DICOM (.dcm) file
-- View CT scan with candidate locations marked in red
-- See patient information (ID, age, scanner)
-- Download CSV report of all candidates
-- Automatic warnings for unusual scan quality
-
-### REST API (FastAPI)
-- `POST /analyze` → upload scan, receive JSON results instantly
-- `GET /health` → check if API is running
-- `GET /results/{scan_id}` → retrieve results of previous scan
-- `GET /results` → list all analyzed scans
-- Interactive API documentation at `http://localhost:8000/docs`
+Every number below is a real, measured result from actual training runs and evaluations — not a placeholder.
 
 ---
 
-## 📊 Performance & Results
+## 📊 Real, Measured Results
 
-| Metric | Value |
-|--------|-------|
-| Candidates detected (sample scan) | 10 |
-| Pipeline steps | 5 |
-| Inference time (FP32) | ~0.43ms per patch |
-| Inference time (INT8 quantized) | ~0.63ms per patch |
-| Model size (FP32) | 3.22 MB |
-| Model size (INT8) | ~0.8 MB |
-| Lung pixels detected | 196,328 |
-| Automatic quality warnings | ✅ |
-| Error handling | ✅ |
+### Nodule Detection (2D classifiers, LUNA16)
 
-> ⚠️ Note: This project uses a classical candidate detection pipeline.
-> Training the neural network classifier on LUNA16 labeled data is the next step
-> toward achieving competitive FROC sensitivity scores.
+Both models trained on subset0+1+2, evaluated on **subset3 — genuinely unseen data**:
+
+| Model | Accuracy | Sensitivity | Specificity |
+|---|---|---|---|
+| SimpleCNN (custom 2-conv-layer CNN) | 77.7% | 71.5% | 81.0% |
+| **ResNet-18 (ImageNet transfer learning)** | **87.8%** | **83.5%** | **90.0%** |
+
+SimpleCNN's **FROC score** (LUNA16's standard competition metric — average sensitivity across 7 standard false-positive-rate operating points): **76.6%**
+
+**Finding:** Transfer learning from ImageNet gave a real, meaningful improvement despite the domain gap between natural photos and CT scans.
+
+### Full-Pipeline Detection (U-Net + density-based detection + ResNet-18)
+
+Tested on 15 real LUNA16 scans with 25 documented nodules:
+
+| Confidence threshold | Sensitivity | Avg false positives/scan |
+|---|---|---|
+| 0.30 | 96.0% | 10.8 |
+| 0.50 | 96.0% | 8.3 |
+| 0.70 | 88.0% | 6.3 |
+| 0.90 | 80.0% | 4.7 |
+| 0.99 | 64.0% | 2.1 |
+
+**Multi-slice consistency filtering** (requiring a candidate to appear across 2+ consecutive slices, with a bypass for very high-confidence ≥0.9 single-slice detections) reduced false positives by **29% (25.9→18.5 per scan) with zero sensitivity loss (88.0%)** compared to unfiltered single-slice detection, on a separate 15-scan test. This filter is implemented as a standalone full-volume analysis function (`analyze_volume_with_multislice_filter`) — not yet integrated into the interactive web app, since full-volume CPU inference takes several minutes per scan.
+
+### Malignancy Classification (3D CNN, LIDC-IDRI)
+
+Trained on 75 patients (175 nodule annotations, multi-radiologist consensus labels), tested on a held-out 35-sample split:
+- **Accuracy: 80.0%**
+- Well-calibrated: prediction mean (0.367) closely tracks the true positive rate (0.371)
+
+**A real bug was found and fixed here**: an initial version had a coordinate-axis ordering error in 3D patch extraction, silently producing empty/padding patches for most nodules. This was caught by noticing a suspicious 100% validation accuracy on only 12 samples — a red flag investigated rather than accepted. After fixing the bug and expanding from 25 to 75 patients, this became a properly diagnosed, trustworthy result.
+
+### Lung Segmentation (U-Net)
+
+- **Dice score: 0.8147**
+- **IoU: 0.7858**
+- Visually confirmed to produce more anatomically accurate lung boundaries than the classical threshold method on certain scans, where the classical approach over-included non-lung tissue due to its simple intensity threshold.
+
+### Ensemble (3× SimpleCNN, different random seeds)
+
+- 77.0% accuracy vs. 75.1% for the single best model — a modest, real improvement. Model disagreement (uncertainty) was fairly low (std ≈ 0.077), suggesting the three models learned similar patterns rather than being highly diverse.
+
+### Model Export & Optimization
+
+- **PyTorch model**: 804,193 parameters, 3.22 MB
+- **ONNX export**: 2.76 KB (successfully converted, opset 17→18)
+- **Dynamic INT8 quantization**: did NOT reliably speed up inference for this small model (0.42x–1.06x across three runs — essentially a wash or slightly slower). This is an honest, documented finding: quantization benefits are more pronounced on larger models than the uplift seen here.
 
 ---
 
 ## 🏗️ System Architecture
 
 ```
-DICOM File (.dcm)
-        ↓
-[1] load_dicom.py
-    → Read DICOM, extract metadata (patient ID, age, scanner)
-    → Validate required fields (RescaleSlope, RescaleIntercept)
-        ↓
-[2] preprocess.py
-    → Convert raw pixels to Hounsfield Units (HU = pixel × slope + intercept)
-    → Clip HU values to [-1000, 400]
-    → Normalize to [0.0, 1.0]
-        ↓
-[3] segmentation.py
-    → Threshold at -400 HU to create binary lung mask
-    → Apply morphological erosion + dilation to clean mask
-    → Label connected components, keep 2 largest (lungs)
-        ↓
-[4] pipeline.py
-    → Fill holes in lung mask (solid lung boundary)
-    → Subtract original mask to find internal structures
-    → Extract candidates: centroid (x,y), area, mean_intensity
-        ↓
-[5] Output
-    → Candidates DataFrame → CSV file
-    → Annotated CT scan image → PNG file
-    → Clinical report → printed + displayed in app
-        ↓
+DICOM File (.dcm) or full 3D volume (.mhd/.raw)
+        │
+        ▼
+[1] Load & Preprocess
+    → Read DICOM/volume, convert to Hounsfield Units
+    → Validate metadata (RescaleSlope/Intercept), flag unusual slice thickness
+        │
+        ▼
+[2] Lung Segmentation
+    → Classical: HU threshold (<-400) + morphological cleanup
+    → OR trained U-Net (MiniUNet, Dice 0.81) — recommended, more accurate
+        │
+        ▼
+[3] Candidate Detection
+    → Density-based: finds dense tissue regions inside the lung mask
+      (segmentation-agnostic — works correctly with either segmentation method)
+        │
+        ▼
+[4] Nodule Classification
+    → SimpleCNN or ResNet-18 (recommended — proven better on unseen data)
+    → Optional: multi-slice consistency filtering for full-volume analysis
+        │
+        ▼
+[5] Malignancy Estimation
+    → 3D CNN + clinical features (diameter, subtlety, texture)
+    → Maps to illustrative Lung-RADS category
+        │
+        ▼
 ┌─────────────────┐    ┌─────────────────┐
 │  Streamlit App  │    │   FastAPI REST   │
 │  (Visual UI)    │    │   (Machine API)  │
-│  localhost:8502 │    │  localhost:8000  │
 └─────────────────┘    └─────────────────┘
 ```
 
@@ -104,224 +121,133 @@ DICOM File (.dcm)
 
 ## 🛠️ Complete Tech Stack
 
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Language | Python 3.10 | Core development |
-| Deep Learning | PyTorch 2.0 | CNN models, training |
-| Medical Imaging | pydicom | DICOM file handling |
-| Image Processing | scikit-image, OpenCV | Segmentation, morphology |
-| Scientific Computing | NumPy, SciPy | Array operations, fill holes |
-| Data Analysis | Pandas | Candidate DataFrames |
-| Visualization | Matplotlib | CT scan plots, heatmaps |
-| Web Interface | Streamlit | Clinical UI |
-| REST API | FastAPI + Uvicorn | Machine-to-machine API |
-| Model Export | ONNX | Cross-platform deployment |
-| Augmentation | TorchIO | Medical image augmentation |
-| Notebooks | Jupyter | Data exploration |
+| Component | Technology |
+|-----------|-----------|
+| Language | Python 3.10 |
+| Deep Learning | PyTorch |
+| Medical Imaging | pydicom, SimpleITK |
+| Image Processing | scikit-image, SciPy |
+| LIDC-IDRI Annotations | pylidc |
+| Data Analysis | pandas, NumPy |
+| Visualization | Matplotlib |
+| Web Interface | Streamlit |
+| REST API | FastAPI + Uvicorn |
+| Model Export | ONNX |
+| GPU Training | Google Colab (T4) |
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Anaconda or Miniconda installed
+- Anaconda or Miniconda
 - A chest CT scan in DICOM format (.dcm)
 
-### Step 1 — Clone the repository
-```bash
-git clone https://github.com/YOUR_USERNAME/lung-cancer-detection.git
-cd lung-cancer-detection
-```
-
-### Step 2 — Create virtual environment
+### Setup
 ```bash
 conda create -n lungcancer python=3.10
 conda activate lungcancer
-```
-
-### Step 3 — Install all dependencies
-```bash
 pip install -r requirements.txt
+pip install SimpleITK
 ```
 
-### Step 4 — Add your DICOM file
-```bash
-# Place your .dcm file here:
-data/raw/sample.dcm
-```
-
-### Step 5 — Run the Streamlit web app
+### Run the web app
 ```bash
 streamlit run src/app/app.py
-# Opens automatically at http://localhost:8502
 ```
 
-### Step 6 — Or run the REST API
+### Run the REST API
 ```bash
 python src/app/api.py
 # Visit http://localhost:8000/docs for interactive documentation
 ```
 
-### Step 7 — Or run the full pipeline directly
+### Run the full pipeline directly
 ```bash
-python src/full_pipeline.py
-# Processes data/raw/sample.dcm and saves results to outputs/
+python full_pipeline.py
 ```
 
 ---
 
-## 📁 Complete Project Structure
+## 📁 Project Structure
 
 ```
 lung-cancer-detection/
-├── data/
-│   └── raw/                         ← Place DICOM files here
-│       └── sample.dcm
-├── notebooks/
-│   └── exploration.ipynb            ← Dataset exploration + Day 3 analysis
-├── outputs/                         ← Generated images, CSVs, models
-│   ├── day1_ct_slice.png            ← NumPy normalization demo
-│   ├── day2_raw_ct_scan.png         ← Raw DICOM visualization
-│   ├── day3_nodule_distribution.png ← Nodule size histogram
-│   ├── day4_preprocessing.png       ← HU conversion pipeline
-│   ├── day5_segmentation.png        ← Binary lung mask
-│   ├── day6_lung_mask.png           ← Connected components
-│   ├── day7_mini_project.png        ← Full Week 1 pipeline
-│   ├── day15_augmentation.png       ← Augmentation demo
-│   ├── day16_attention.png          ← Attention weight heatmap
-│   ├── day18_gradcam.png            ← Grad-CAM visualization
-│   ├── day21_clinical_metrics.png   ← Sensitivity vs PPV curve
-│   ├── day22_full_pipeline.png      ← Complete pipeline output
-│   ├── model.onnx                   ← Exported ONNX model
-│   ├── nodule_candidates.csv        ← Detected candidates
-│   └── final_candidates.csv         ← Final pipeline candidates
+├── data/raw/                        ← Sample DICOM file
+├── checkpoints/                     ← Trained model weights
+│   ├── best_model.pt                ← SimpleCNN (CPU, subset0+1)
+│   ├── best_model_gpu.pt            ← SimpleCNN (GPU, subset0+1+2)
+│   ├── resnet18_012.pt              ← ResNet-18 (best nodule classifier)
+│   ├── malignancy_model_100patients.pt  ← Malignancy classifier (75 patients)
+│   └── unet_model_40ep.pt           ← U-Net segmentation (Dice 0.81)
+├── outputs/                         ← Generated visualizations, reports
 ├── src/
 │   ├── preprocessing/
-│   │   ├── load_dicom.py            ← DICOM loading + metadata
-│   │   ├── preprocess.py            ← HU conversion + normalization
-│   │   ├── segmentation.py          ← Lung segmentation
-│   │   ├── pipeline.py              ← Candidate detection
-│   │   └── augmentation.py          ← Data augmentation (flip, rotate, noise)
+│   │   ├── luna16_dataset.py        ← LUNA16 patch dataset loader
+│   │   ├── precompute_luna16_patches.py  ← Efficient 2D patch extraction
+│   │   ├── precompute_lung_masks.py ← U-Net training data extraction
+│   │   ├── lidc_extraction.py       ← LIDC-IDRI malignancy data extraction
+│   │   └── model_integration.py     ← Wires trained models into the pipeline
 │   ├── models/
-│   │   ├── cnn_2d.py                ← SimpleCNN (2D binary classifier)
-│   │   ├── cnn_3d.py                ← SimpleCNN3D (volumetric classifier)
-│   │   ├── unet.py                  ← MiniUNet (lung segmentation)
+│   │   ├── cnn_2d.py                ← SimpleCNN
+│   │   ├── cnn_3d.py                ← 3D CNN (architecture fixed, untrained)
 │   │   ├── resnet_transfer.py       ← ResNet-18 transfer learning
-│   │   ├── attention.py             ← Self-attention mechanism
-│   │   ├── malignancy_classifier.py ← Multimodal malignancy scoring
-│   │   └── ensemble.py              ← Ensemble (average + majority vote)
+│   │   ├── unet.py                  ← MiniUNet segmentation
+│   │   ├── malignancy_classifier.py ← 3D CNN + clinical features
+│   │   └── ensemble.py              ← Multi-model averaging
 │   ├── training/
-│   │   └── train.py                 ← Weighted BCE + Focal loss
+│   │   ├── train_nodule_gpu.py      ← SimpleCNN training
+│   │   ├── train_resnet.py          ← ResNet-18 training
+│   │   ├── train_unet.py            ← U-Net training (Dice/IoU tracking)
+│   │   └── train_malignancy.py      ← Malignancy classifier training
 │   ├── evaluation/
-│   │   ├── metrics.py               ← IoU calculation
-│   │   ├── clinical_metrics.py      ← Sensitivity, Specificity, PPV, NPV
-│   │   ├── grad_cam.py              ← Grad-CAM explainability
-│   │   └── froc_simulation.py       ← FROC false positive reduction
+│   │   ├── clinical_metrics.py      ← Sensitivity, specificity, PPV, NPV
+│   │   ├── froc_real.py             ← Real FROC evaluation
+│   │   ├── grad_cam.py              ← Grad-CAM on real trained checkpoints
+│   │   └── lung_rads.py             ← Malignancy → Lung-RADS mapping
 │   ├── optimization/
-│   │   └── model_optimizer.py       ← ONNX export + INT8 quantization
-│   ├── app/
-│   │   ├── app.py                   ← Streamlit clinical interface
-│   │   └── api.py                   ← FastAPI REST endpoint
-│   └── full_pipeline.py             ← End-to-end integrated pipeline
-├── requirements.txt                 ← All dependencies
-└── README.md                        ← You are here
+│   │   └── model_optimizer.py       ← ONNX export, quantization benchmarking
+│   └── app/
+│       ├── app.py                   ← Streamlit interface
+│       └── api.py                   ← FastAPI REST endpoint
+├── full_pipeline.py                 ← End-to-end integrated pipeline
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## 🧠 Models Built
+## 🔬 What Was Actually Learned (Debugging Log)
 
-| Model | Architecture | Purpose | File |
-|-------|-------------|---------|------|
-| SimpleCNN | 2D CNN (conv1→conv2→fc1→fc2→sigmoid) | Nodule patch classification | cnn_2d.py |
-| SimpleCNN3D | 3D CNN (Conv3d layers) | Volumetric nodule classification | cnn_3d.py |
-| ResNet-18 | Pretrained ImageNet → fine-tuned | Transfer learning classifier | resnet_transfer.py |
-| MiniUNet | Encoder-decoder + skip connections | Lung segmentation | unet.py |
-| SelfAttention | Q/K/V attention mechanism | Long-range dependency modeling | attention.py |
-| MalignancyClassifier | 3D CNN + clinical features | Multimodal malignancy scoring | malignancy_classifier.py |
-| EnsembleModel | Average + majority vote + uncertainty | Robust combined predictions | ensemble.py |
+This project involved real, non-trivial debugging — worth documenting honestly:
+
+- **Coordinate axis-order bug** in 3D patch extraction for the malignancy classifier — caused by mismatching `pylidc`'s centroid convention, silently producing empty patches. Caught by noticing a suspiciously perfect validation score, not by the code failing outright.
+- **Memory leak** during LUNA16 patch precomputation — caused by SimpleITK volume objects not being released properly when cached across many candidates. Fixed by explicit per-scan loading with forced garbage collection.
+- **Segmentation/candidate-detection coupling bug** — the classical candidate-finding method secretly relied on "holes" created by the classical segmentation's imperfections. Switching to U-Net's cleaner masks broke this silently (found 0 candidates on a scan with a confirmed nodule) until candidate detection was redesigned to work directly on tissue density rather than mask holes.
+- **Quantization does not always help** — dynamic INT8 quantization was tested honestly and found not to improve inference speed for this project's small model size, rather than force-reporting a positive result.
 
 ---
 
-## 🔬 Key Concepts Implemented
+## ⚠️ Limitations & Honest Scope
 
-### Week 1 — Classical Pipeline
-- DICOM loading and metadata extraction
-- Hounsfield Unit conversion and windowing
-- Lung segmentation via thresholding + morphological operations
-- Connected component analysis
-- Nodule candidate detection (fill-holes method)
+### What this project does NOT do
+- **Does not determine cancer stage.** Staging requires lymph node imaging (often PET), whole-body metastasis screening, and frequently tissue biopsy — none of which a chest CT nodule detector can provide. This is a fundamental data-availability limitation, not something more training data or bigger models would fix.
+- **Malignancy scoring is 2D-approximated in the interactive app.** The malignancy classifier was trained on true 3D CT volumes, but the Streamlit app/API only process single 2D DICOM slices — malignancy estimates there are approximations (a 2D slice stacked into a fake 3D shape), clearly caveated in the UI.
+- **Multi-slice consistency filtering is not yet in the interactive app** — it requires a full 3D volume and takes several minutes per scan on CPU, making it impractical for the current single-slice web upload workflow.
 
-### Week 2 — Deep Learning
-- 2D and 3D Convolutional Neural Networks
-- Transfer learning with pretrained ResNet-18
-- U-Net encoder-decoder architecture with skip connections
-- IoU (Intersection over Union) calculation
-- Non-Maximum Suppression (NMS) concepts
-- False positive reduction pipeline
-
-### Week 3 — Advanced Techniques
-- Data augmentation (flip, rotate, Gaussian noise)
-- Self-attention mechanism from scratch
-- Weighted cross-entropy and Focal loss for class imbalance
-- Grad-CAM explainability / interpretability
-- Multimodal malignancy prediction (image + clinical features)
-- Ensemble models with uncertainty quantification
-- Clinical validation metrics (Sensitivity, Specificity, PPV, NPV, FROC)
-
-### Week 4 — Production Deployment
-- Full pipeline integration with error handling
-- PipelineError vs PipelineWarning classification
-- ONNX model export for cross-platform deployment
-- INT8 dynamic quantization (4x size reduction)
-- Streamlit clinical web interface
-- FastAPI REST API with automatic documentation
-- Clinical disclaimer and regulatory awareness
-
----
-
-## ⚠️ Limitations & Future Work
-
-### Current Limitations
-- Neural network classifiers not yet trained on LUNA16 labeled data
-- Only processes single 2D DICOM slice (not full 3D volume stack)
-- Classical candidate detection (no learned false positive reduction)
-- No FROC evaluation on standardized test set
-- In-memory result storage (not persistent database)
-
-### Next Steps Toward Production
-- [ ] Train SimpleCNN3D on LUNA16 labeled nodule patches
-- [ ] Evaluate FROC sensitivity @ 1, 2, 4, 8 FP/scan on held-out test set
-- [ ] Replace classical segmentation with trained U-Net
-- [ ] Add PostgreSQL database for persistent result storage
-- [ ] Implement federated learning for multi-hospital training
-- [ ] Add HIPAA-compliant encryption for patient data
-- [ ] Begin FDA 510(k) regulatory pathway planning
-
----
-
-## 🏥 Clinical & Ethical Considerations
+### Known dataset/scale constraints
+- Malignancy classifier trained on 75 patients — small by research standards; more patients would likely improve reliability further.
+- Nodule classifiers trained on 3 of LUNA16's 10 subsets — full-dataset training would likely improve results further, following the same "more data helps" pattern observed throughout this project.
+- U-Net is a small architecture (a few conv layers) — a deeper network with more training data would likely exceed Dice 0.81.
 
 ### Regulatory Status
-This project is **NOT** FDA approved or CE marked. It has not undergone clinical validation trials.
-
-### HIPAA Compliance
-- Current implementation does NOT meet HIPAA requirements
-- Patient data is stored in unencrypted temp files
-- No audit logging or access controls implemented
-- Production deployment would require full HIPAA compliance review
-
-### Bias & Fairness
-- Training data (LUNA16) consists primarily of Western patients
-- Performance may vary across different populations, scanners, and institutions
-- Subgroup analysis by age, sex, and ethnicity required before clinical deployment
+This project is **NOT** FDA approved or CE marked and has not undergone clinical validation trials of any kind.
 
 ### Clinical Disclaimer
 > ⚠️ **For research and educational purposes only.**
 > This tool is NOT approved for clinical diagnosis.
 > All predictions must be reviewed by a qualified radiologist.
 > Do not use for actual patient care decisions.
-> The developer assumes no liability for clinical misuse.
 
 ---
 
@@ -331,26 +257,12 @@ This project is **NOT** FDA approved or CE marked. It has not undergone clinical
 |----------|------|
 | LUNA16 Dataset | https://luna16.grand-challenge.org/ |
 | LIDC-IDRI Dataset | https://www.cancerimagingarchive.net/collection/lidc-idri/ |
+| pylidc | https://pylidc.github.io/ |
 | pydicom | https://pydicom.github.io/ |
-| MONAI Framework | https://monai.io/ |
 | Lung-RADS Guidelines | https://www.acr.org/Clinical-Resources/Reporting-and-Data-Systems/Lung-RADS |
-| Focal Loss Paper | https://arxiv.org/abs/1708.02002 |
-| U-Net Paper | https://arxiv.org/abs/1505.04597 |
-| Grad-CAM Paper | https://arxiv.org/abs/1610.02391 |
-
----
-
-## 👤 About
-
-Built by **Isha Goyal** as a 30-day end-to-end medical AI learning project.
-
-**Email:** ishagoyal4863@gmail.com
-**LinkedIn:** https://www.linkedin.com/in/isha-goyal-366ba13ab?utm_source=share_via&utm_content=profile&utm_medium=member_android
-**GitHub:** https://github.com/Isha-Goyal-1611
 
 ---
 
 ## 📄 License
 
 This project is licensed under the MIT License.
-See [LICENSE](LICENSE) for details.

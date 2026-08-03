@@ -7,7 +7,8 @@ from scipy import ndimage
 from skimage import morphology, measure
 import os
 import sys
-
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
+from preprocessing.model_integration import find_candidates_density_based, segment_lungs_with_unet
 # ── Error Classes ────────────────────────────────────────────
 class PipelineError(Exception):
     """Raised when pipeline cannot continue"""
@@ -62,9 +63,9 @@ def preprocess(pixel_array, slope, intercept):
     normalized = (hu_clipped + 1000) / 1400
     return hu_image, normalized
 
-# ── Step 3: Segment Lungs ────────────────────────────────────
+# ── Step 3: Segment Lungs (CLASSICAL — kept for reference/comparison) ──
 def segment_lungs(hu_image, warnings):
-    """Extract lung mask with validation"""
+    """Extract lung mask with validation (classical threshold method)"""
     binary_mask = hu_image < -400
     cleaned = morphology.binary_erosion(binary_mask)
     cleaned = morphology.binary_dilation(cleaned)
@@ -96,7 +97,7 @@ def segment_lungs(hu_image, warnings):
 
 # ── Step 4: Find Candidates ──────────────────────────────────
 def find_candidates(hu_image, lung_mask, threshold=0.5):
-    """Find nodule candidates using fill-holes method"""
+    """Find nodule candidates using fill-holes method (classical, kept for reference)"""
     filled_lung = ndimage.binary_fill_holes(lung_mask)
     candidate_mask = filled_lung.astype(int) - lung_mask.astype(int)
     labeled = measure.label(candidate_mask)
@@ -141,7 +142,7 @@ def generate_report(dicom_path, hu_image, lung_mask,
     axes[0].set_title('HU Image')
     
     axes[1].imshow(lung_mask, cmap='gray')
-    axes[1].set_title('Lung Mask')
+    axes[1].set_title('Lung Mask (U-Net)')
     
     axes[2].imshow(hu_image, cmap='gray')
     if not candidates_df.empty:
@@ -189,14 +190,14 @@ def run_full_pipeline(dicom_path, threshold=0.5):
     hu_image, normalized = preprocess(pixel_array, slope, intercept)
     print(f"      HU range: [{hu_image.min():.0f}, {hu_image.max():.0f}]")
     
-    # Step 3
-    print("\n[3/5] Segmenting lungs...")
-    lung_mask = segment_lungs(hu_image, warnings)
+    # Step 3 — NOW USES TRAINED U-NET instead of classical threshold
+    print("\n[3/5] Segmenting lungs (U-Net)...")
+    lung_mask = segment_lungs_with_unet(hu_image, warnings)
     print(f"      Lung pixels: {lung_mask.sum():,}")
     
-    # Step 4
+    # Step 4 — uses trained SimpleCNN/ResNet nodule classifier
     print("\n[4/5] Finding nodule candidates...")
-    candidates_df = find_candidates(hu_image, lung_mask, threshold)
+    candidates_df = find_candidates_density_based(hu_image, lung_mask, threshold)
     print(f"      Candidates: {len(candidates_df)}")
     
     # Step 5
@@ -210,5 +211,5 @@ def run_full_pipeline(dicom_path, threshold=0.5):
 
 # ── Run ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    candidates, warnings = run_full_pipeline('data/raw/sample.dcm', threshold=0.05)
+    candidates, warnings = run_full_pipeline('data/raw/sample.dcm', threshold=0.5)
     print(candidates[['x', 'y', 'confidence']])
