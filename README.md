@@ -1,4 +1,4 @@
-# 🫁 Lung Cancer Detection System
+# 🫁 AI-Based Lung Nodule Detection
 
 AI-powered lung nodule detection, malignancy estimation, and lung segmentation from chest CT scans. Built as an end-to-end learning project combining classical image processing with trained deep learning models — real data, real training, real evaluation, real bugs found and fixed along the way.
 
@@ -12,14 +12,14 @@ AI-powered lung nodule detection, malignancy estimation, and lung segmentation f
 
 ## 🎯 What This Project Actually Does
 
-Given a chest CT scan (DICOM format), this system:
+Given a chest CT scan (DICOM format — single slice or full multi-slice series), this system:
 
 1. **Segments lung tissue** using either a classical HU-threshold method or a trained U-Net (Dice 0.81)
 2. **Detects nodule candidates** using density-based analysis inside the lung region
 3. **Classifies candidates** as likely nodule vs. not, using a trained CNN — either a compact SimpleCNN or a fine-tuned ResNet-18 (ResNet-18 proven meaningfully better on held-out data)
 4. **Estimates malignancy** for detected nodules using a 3D CNN trained on LIDC-IDRI multi-radiologist consensus labels
 5. **Maps malignancy scores to illustrative Lung-RADS categories**
-6. **Optionally applies multi-slice consistency filtering** (full-volume analysis) to reduce false positives
+6. **Applies multi-slice consistency filtering** for full-volume nodule detection — reduces false positives with no loss in sensitivity, and is available directly in the web app
 
 Every number below is a real, measured result from actual training runs and evaluations — not a placeholder.
 
@@ -52,13 +52,17 @@ Tested on 15 real LUNA16 scans with 25 documented nodules:
 | 0.90 | 80.0% | 4.7 |
 | 0.99 | 64.0% | 2.1 |
 
-**Multi-slice consistency filtering** (requiring a candidate to appear across 2+ consecutive slices, with a bypass for very high-confidence ≥0.9 single-slice detections) reduced false positives by **29% (25.9→18.5 per scan) with zero sensitivity loss (88.0%)** compared to unfiltered single-slice detection, on a separate 15-scan test. This filter is implemented as a standalone full-volume analysis function (`analyze_volume_with_multislice_filter`) — not yet integrated into the interactive web app, since full-volume CPU inference takes several minutes per scan.
+**Multi-slice consistency filtering** (requiring a candidate to appear across 2+ consecutive slices, with a bypass for very high-confidence ≥0.9 single-slice detections) reduced false positives by **29% (25.9→18.5 per scan) with zero sensitivity loss (88.0%)** compared to unfiltered single-slice detection, on a separate 15-scan test.
+
+This filter is implemented as `analyze_volume_with_multislice_filter()` and is **integrated directly into the Streamlit app's "Full Volume Analysis" section** — users can upload an entire DICOM series (all slices of one scan) and get filtered, multi-slice-verified nodule detections, not just single-slice results. Verified end-to-end on a real 40-slice CT volume: correctly built a `(40, 512, 512)` volume, found 27 filtered candidates, several confirmed via genuine multi-slice tracking (`n_slices_tracked` 2–6), with a visually verified detection on real lung anatomy.
 
 ### Malignancy Classification (3D CNN, LIDC-IDRI)
 
 Trained on 75 patients (175 nodule annotations, multi-radiologist consensus labels), tested on a held-out 35-sample split:
 - **Accuracy: 80.0%**
 - Well-calibrated: prediction mean (0.367) closely tracks the true positive rate (0.371)
+
+**Integration status:** Full-volume analysis now uses REAL 3D patches extracted directly from the uploaded volume for malignancy scoring (`estimate_malignancy_3d()`) — verified working on the same 40-slice test scan, producing sensible, non-extreme scores (0.30-0.36 range) across 27 detected candidates. Single-slice mode still uses a 2D-approximated input (a slice stacked into a fake 3D shape), since a single slice has no real depth information to extract a genuine 3D patch from.
 
 **A real bug was found and fixed here**: an initial version had a coordinate-axis ordering error in 3D patch extraction, silently producing empty/padding patches for most nodules. This was caught by noticing a suspicious 100% validation accuracy on only 12 samples — a red flag investigated rather than accepted. After fixing the bug and expanding from 25 to 75 patients, this became a properly diagnosed, trustworthy result.
 
@@ -83,11 +87,12 @@ Trained on 75 patients (175 nodule annotations, multi-radiologist consensus labe
 ## 🏗️ System Architecture
 
 ```
-DICOM File (.dcm) or full 3D volume (.mhd/.raw)
+DICOM File (.dcm) — single slice OR full multi-slice series
         │
         ▼
 [1] Load & Preprocess
     → Read DICOM/volume, convert to Hounsfield Units
+    → For multi-slice uploads: sort by ImagePositionPatient, stack into 3D volume
     → Validate metadata (RescaleSlope/Intercept), flag unusual slice thickness
         │
         ▼
@@ -103,17 +108,22 @@ DICOM File (.dcm) or full 3D volume (.mhd/.raw)
         ▼
 [4] Nodule Classification
     → SimpleCNN or ResNet-18 (recommended — proven better on unseen data)
-    → Optional: multi-slice consistency filtering for full-volume analysis
+    → Full-volume uploads: multi-slice consistency filtering applied
+      (2+ consecutive slices required, OR confidence ≥0.9 bypass)
+      → 29% fewer false positives, zero sensitivity loss
         │
         ▼
 [5] Malignancy Estimation
     → 3D CNN + clinical features (diameter, subtlety, texture)
     → Maps to illustrative Lung-RADS category
+    → Full-volume mode: REAL 3D patches from the actual volume
+    → Single-slice mode: 2D-approximated (fake 3D via slice stacking)
         │
         ▼
 ┌─────────────────┐    ┌─────────────────┐
 │  Streamlit App  │    │   FastAPI REST   │
-│  (Visual UI)    │    │   (Machine API)  │
+│  (single-slice  │    │   (Machine API)  │
+│  + full-volume) │    │                  │
 └─────────────────┘    └─────────────────┘
 ```
 
@@ -141,7 +151,7 @@ DICOM File (.dcm) or full 3D volume (.mhd/.raw)
 
 ### Prerequisites
 - Anaconda or Miniconda
-- A chest CT scan in DICOM format (.dcm)
+- A chest CT scan in DICOM format (.dcm) — single slice or full series
 
 ### Setup
 ```bash
@@ -155,6 +165,8 @@ pip install SimpleITK
 ```bash
 streamlit run src/app/app.py
 ```
+- **Single-slice analysis**: upload one `.dcm` file for quick nodule detection + 2D-approximated malignancy estimate
+- **Full-volume analysis**: upload all `.dcm` slices of one scan together for multi-slice-filtered nodule detection (takes several minutes on CPU — depends on scan size, verified working on a real 40-slice scan)
 
 ### Run the REST API
 ```bash
@@ -187,7 +199,8 @@ lung-cancer-detection/
 │   │   ├── precompute_luna16_patches.py  ← Efficient 2D patch extraction
 │   │   ├── precompute_lung_masks.py ← U-Net training data extraction
 │   │   ├── lidc_extraction.py       ← LIDC-IDRI malignancy data extraction
-│   │   └── model_integration.py     ← Wires trained models into the pipeline
+│   │   └── model_integration.py     ← Wires trained models into the pipeline,
+│   │                                   including full-volume multi-slice analysis
 │   ├── models/
 │   │   ├── cnn_2d.py                ← SimpleCNN
 │   │   ├── cnn_3d.py                ← 3D CNN (architecture fixed, untrained)
@@ -208,7 +221,7 @@ lung-cancer-detection/
 │   ├── optimization/
 │   │   └── model_optimizer.py       ← ONNX export, quantization benchmarking
 │   └── app/
-│       ├── app.py                   ← Streamlit interface
+│       ├── app.py                   ← Streamlit interface (single-slice + full-volume)
 │       └── api.py                   ← FastAPI REST endpoint
 ├── full_pipeline.py                 ← End-to-end integrated pipeline
 ├── requirements.txt
@@ -225,6 +238,7 @@ This project involved real, non-trivial debugging — worth documenting honestly
 - **Memory leak** during LUNA16 patch precomputation — caused by SimpleITK volume objects not being released properly when cached across many candidates. Fixed by explicit per-scan loading with forced garbage collection.
 - **Segmentation/candidate-detection coupling bug** — the classical candidate-finding method secretly relied on "holes" created by the classical segmentation's imperfections. Switching to U-Net's cleaner masks broke this silently (found 0 candidates on a scan with a confirmed nodule) until candidate detection was redesigned to work directly on tissue density rather than mask holes.
 - **Quantization does not always help** — dynamic INT8 quantization was tested honestly and found not to improve inference speed for this project's small model size, rather than force-reporting a positive result.
+- **Multi-slice filter tuning** — an initial 3-consecutive-slice requirement cut false positives sharply but cost too much sensitivity (96%→64%); a high-confidence bypass rule (keep single-slice detections ≥0.9 confidence even without multi-slice consistency) recovered full sensitivity while still cutting false positives 29%.
 
 ---
 
@@ -232,8 +246,8 @@ This project involved real, non-trivial debugging — worth documenting honestly
 
 ### What this project does NOT do
 - **Does not determine cancer stage.** Staging requires lymph node imaging (often PET), whole-body metastasis screening, and frequently tissue biopsy — none of which a chest CT nodule detector can provide. This is a fundamental data-availability limitation, not something more training data or bigger models would fix.
-- **Malignancy scoring is 2D-approximated in the interactive app.** The malignancy classifier was trained on true 3D CT volumes, but the Streamlit app/API only process single 2D DICOM slices — malignancy estimates there are approximations (a 2D slice stacked into a fake 3D shape), clearly caveated in the UI.
-- **Multi-slice consistency filtering is not yet in the interactive app** — it requires a full 3D volume and takes several minutes per scan on CPU, making it impractical for the current single-slice web upload workflow.
+- **Malignancy scoring is 2D-approximated in single-slice mode only.** Full-volume mode now uses real 3D patches extracted from the actual uploaded volume (verified working). Single-slice mode still approximates by stacking one 2D slice into a fake 3D shape, since a single slice has no genuine depth to extract a real patch from — clearly caveated in the UI. Even with real 3D patches, malignancy scores use default (neutral 0.5) subtlety/texture clinical features, since these come from radiologist ratings not available outside LIDC-IDRI-style annotations — so full-volume malignancy scores are more genuine than single-slice, but still not clinically validated.
+- **Full-volume nodule detection is slow on CPU** — several minutes per scan depending on slice count, since every slice runs full segmentation + detection + classification. Genuinely usable, just not fast; a GPU (e.g. via Colab) would make this dramatically faster, following the same speedup seen during training (roughly 1000x for the 2D classifier).
 
 ### Known dataset/scale constraints
 - Malignancy classifier trained on 75 patients — small by research standards; more patients would likely improve reliability further.

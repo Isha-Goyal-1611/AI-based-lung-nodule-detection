@@ -379,3 +379,76 @@ def analyze_volume_with_multislice_filter(volume, min_consecutive=2, high_conf_b
 
     return pd.DataFrame(results,
                          columns=['x', 'y', 'z', 'confidence', 'n_slices_tracked'])
+
+_malignancy_model_cache = {"model": None}
+
+
+def get_malignancy_model():
+    if _malignancy_model_cache["model"] is None:
+        from models.malignancy_classifier import MalignancyClassifier
+        model = MalignancyClassifier()
+        checkpoint = torch.load("checkpoints/malignancy_model_100patients.pt", map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        _malignancy_model_cache["model"] = model
+        print(f"      [malignancy] Loaded checkpoint from epoch {checkpoint['epoch']}")
+    return _malignancy_model_cache["model"]
+
+
+def extract_3d_patch_from_volume(volume, center_x, center_y, center_z, patch_size=32):
+    """
+    Extracts a REAL 3D patch from an actual volume, centered at a detected
+    candidate's (x, y, z) location. This is a genuine 3D input for the
+    malignancy classifier - not a 2D slice stacked into a fake 3D shape.
+    volume is expected in (z, y, x) order, matching SimpleITK/DICOM stacking.
+    """
+    half = patch_size // 2
+    cz, cy, cx = int(center_z), int(center_y), int(center_x)
+
+    z_min, z_max = cz - half, cz + half
+    y_min, y_max = cy - half, cy + half
+    x_min, x_max = cx - half, cx + half
+
+    pad_z_before, pad_y_before, pad_x_before = max(0,-z_min), max(0,-y_min), max(0,-x_min)
+    pad_z_after = max(0, z_max - volume.shape[0])
+    pad_y_after = max(0, y_max - volume.shape[1])
+    pad_x_after = max(0, x_max - volume.shape[2])
+
+    vol = volume
+    if any([pad_z_before, pad_y_before, pad_x_before, pad_z_after, pad_y_after, pad_x_after]):
+        vol = np.pad(volume,
+                     ((pad_z_before, pad_z_after), (pad_y_before, pad_y_after), (pad_x_before, pad_x_after)),
+                     mode="constant", constant_values=-1000)
+        z_min += pad_z_before; z_max += pad_z_before
+        y_min += pad_y_before; y_max += pad_y_before
+        x_min += pad_x_before; x_max += pad_x_before
+
+    patch = vol[z_min:z_max, y_min:y_max, x_min:x_max].astype(np.float32)
+    patch = np.clip(patch, -1000, 400)
+    patch = (patch + 1000) / 1400
+    return patch
+
+
+def estimate_malignancy_3d(volume, x, y, z, area=None):
+    """
+    Real 3D malignancy estimate using an actual volume patch, for use with
+    full-volume analysis. Genuinely better input than the 2D-stacked
+    approximation used in single-slice mode, but subtlety/texture clinical
+    features still default to a neutral 0.5, since these come from
+    radiologist ratings not available outside LIDC-IDRI-style annotations.
+    """
+    model = get_malignancy_model()
+    patch = extract_3d_patch_from_volume(volume, x, y, z)
+
+    if patch.shape != (32, 32, 32):
+        return None  # patch extraction failed (e.g. right at volume edge)
+
+    patch_tensor = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0)
+
+    diameter_estimate = np.sqrt(area / np.pi) * 2 if area else 8.0
+    clinical_features = torch.tensor([[diameter_estimate, 0.5, 0.5]], dtype=torch.float32)
+
+    with torch.no_grad():
+        malignancy_score = model(patch_tensor, clinical_features).item()
+
+    return malignancy_score
