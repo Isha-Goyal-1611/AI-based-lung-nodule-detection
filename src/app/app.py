@@ -97,13 +97,13 @@ def build_volume_from_dicom_series(dicom_files):
 
 # ── Page Config ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="Lung Cancer Detection AI",
+    page_title="Lung Nodule Detection AI",
     page_icon="🫁",
     layout="wide"
 )
 
 # ── Header ───────────────────────────────────────────────────
-st.title("🫁 Lung Cancer Detection System")
+st.title("🫁 AI-based Lung Nodule Detection")
 st.markdown("*AI-powered nodule candidate detection from CT scans*")
 st.divider()
 
