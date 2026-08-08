@@ -30,3 +30,5 @@ debug_*.py
 # Full data directory (only sample.dcm should be tracked)
 data/raw/*
 !data/raw/sample.dcm
+check*.py
+test_dicom_series/
